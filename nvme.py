@@ -159,12 +159,16 @@ def build_get_features(fid, cdw11=0):
     return c
 
 
-def build_create_cq(cqid, cq_addr, qsize, irq_vec=0):
+def build_create_cq(cqid, cq_addr, qsize, irq_vec=0, ie=False):
     c = bytearray(64)
     c[0] = ADM_CREATE_CQ
-    # cdw10: qid | (qsize - 1) << 16, cdw11: PC (phys contiguous) | vec << 16
+    # cdw10: qid | (qsize - 1) << 16, cdw11: PC (phys contiguous) | IE |
+    # vec << 16 -- IE (bit 1) enables interrupts for the queue
+    cdw11 = 0x01 | (irq_vec << 16)
+    if ie:
+        cdw11 |= 0x02
     struct.pack_into('<I', c, 0x28, cqid | ((qsize - 1) << 16))
-    struct.pack_into('<I', c, 0x2c, 0x01 | (irq_vec << 16))
+    struct.pack_into('<I', c, 0x2c, cdw11)
     struct.pack_into('<Q', c, 0x18, cq_addr)
     return c
 
@@ -317,10 +321,11 @@ class NvmeDev:
     """A single NVMe device (default: vnvme) in a qtest-driven QEMU."""
 
     def __init__(self, disk, workdir, device='vnvme', serial='foo',
-                 qemu_binary=None, qemu_args=None, device_opts=''):
+                 qemu_binary=None, qemu_args=None, device_opts='',
+                 machine='pc'):
         assert ';' not in device_opts and ',' not in device_opts
         opts = f',{device_opts}' if device_opts else ''
-        args = ['-M', 'pc',
+        args = ['-M', machine,
                 '-drive', f'if=none,id=drv0,file={disk},format=raw',
                 '-device', f'{device},drive=drv0,serial={serial},'
                            f'addr=04.0{opts}']
@@ -400,11 +405,12 @@ class NvmeDev:
     # io queue lifecycle --------------------------------------------------
 
     def create_io_queue(self, qid, sq_addr=IO_SQ_ADDR, cq_addr=IO_CQ_ADDR,
-                        qsize=16, irq_vec=0):
+                        qsize=16, irq_vec=0, irq_en=False):
         """Create CQ `qid` then SQ `qid`, return an NvmeQueue for the pair."""
         self.q.mem_zero(sq_addr, qsize * 64)
         self.q.mem_zero(cq_addr, qsize * 16)
-        _, sc = self.aq.run(build_create_cq(qid, cq_addr, qsize, irq_vec))
+        _, sc = self.aq.run(build_create_cq(qid, cq_addr, qsize, irq_vec,
+                                           ie=irq_en))
         check(sc, ST_SUCCESS, f'Create CQ {qid}')
         _, sc = self.aq.run(build_create_sq(qid, qid, sq_addr, qsize))
         check(sc, ST_SUCCESS, f'Create SQ {qid}')

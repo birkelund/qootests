@@ -60,6 +60,10 @@ class QemuQTest:
         self._srv = None
         self._sock = None
         self._stderr_file = None
+        self._buf = b''
+        # asynchronous events, e.g. ('raise', 20) for an 'IRQ raise 20'
+        # message emitted after irq_intercept_in; see QemuQTest.cmd()
+        self.irq_events = []
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -93,6 +97,8 @@ class QemuQTest:
             raise QTestError('QEMU did not connect to the qtest socket within '
                              f'{timeout}s\n{self.stderr_tell()}')
         self._sock.settimeout(timeout)
+        self._buf = b''
+        self.irq_events = []
         return self
 
     def stop(self, raise_on_error=True):
@@ -149,24 +155,85 @@ class QemuQTest:
     # wire protocol
     # ------------------------------------------------------------------
 
+    def _read_line(self, timeout):
+        """Read one line from the qtest socket, buffering partial messages.
+
+        The buffer persists across commands so that bytes received past
+        the line we need (e.g. an asynchronous message that arrived in
+        the same recv() as a response) are never lost.
+        """
+        while b'\n' not in self._buf:
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise QTestError('qtest connection closed by QEMU\n'
+                                 + self.stderr_tell())
+            self._buf += chunk
+        line, self._buf = self._buf.split(b'\n', 1)
+        return line.strip().decode()
+
     def cmd(self, c, timeout=10.0):
-        """Send a qtest command, return the response line (without 'OK ')."""
+        """Send a qtest command, return the response line (without 'OK').
+
+        QEMU may send asynchronous messages at any point, e.g.
+        'IRQ raise N' / 'IRQ lower N' after 'irq_intercept_in' has been
+        issued. Those are collected in self.irq_events (a list of
+        ('raise'|'lower', gsi) tuples in arrival order) and reading
+        continues until the response to this command arrives: the
+        request/response pairing is never disturbed by an interleaved
+        event.
+        """
         if self._sock is None:
             raise QTestError('not started')
         self._sock.settimeout(timeout)
         self._sock.sendall(c.encode() + b'\n')
-        buf = b''
-        while b'\n' not in buf:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise QTestError(f'qtest connection closed by QEMU while '
-                                 f'waiting for response to "{c}"\n'
-                                 + self.stderr_tell())
-            buf += chunk
-        resp = buf.split(b'\n', 1)[0].strip().decode()
-        if not resp.startswith('OK'):
-            raise QTestError(f'qtest command "{c}" failed: {resp}')
-        return resp
+        while True:
+            resp = self._read_line(timeout)
+            if resp.startswith('IRQ raise ') or resp.startswith('IRQ lower '):
+                _, kind, num = resp.split()
+                self.irq_events.append((kind, int(num)))
+                continue
+            if not resp.startswith('OK'):
+                raise QTestError(f'qtest command "{c}" failed: {resp}')
+            return resp
+
+    # ------------------------------------------------------------------
+    # irq event handling (see cmd())
+    # ------------------------------------------------------------------
+
+    def pop_irq_event(self, kind):
+        """Pop the first collected IRQ event of `kind` ('raise'/'lower'),
+        or None if there is none. Other events are left in place."""
+        for ev in self.irq_events:
+            if ev[0] == kind:
+                self.irq_events.remove(ev)
+                return ev
+        return None
+
+    def wait_irq(self, kind, timeout=5.0):
+        """Wait for an IRQ event of `kind`, pumping the QEMU main loop with
+        harmless memory reads (which also drives bottom halves, so
+        asynchronous completions get posted). Returns (kind, gsi)."""
+        ev = self.pop_irq_event(kind)
+        if ev is not None:
+            return ev
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.001)
+            self.cmd('readl 0', timeout=1.0)
+            ev = self.pop_irq_event(kind)
+            if ev is not None:
+                return ev
+        raise TimeoutError(f'no IRQ "{kind}" event within {timeout}s '
+                           f'(collected so far: {self.irq_events})')
+
+    def assert_no_irq(self, timeout=0.1):
+        """Pump for `timeout` seconds and assert that no IRQ events arrived."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.001)
+            self.cmd('readl 0', timeout=1.0)
+        if self.irq_events:
+            raise AssertionError(f'unexpected IRQ events: {self.irq_events}')
 
     def _read(self, name, addr):
         resp = self.cmd(f'{name} 0x{addr:x}')
