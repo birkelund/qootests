@@ -351,6 +351,22 @@ class NvmeDev:
         self._cid = (self._cid + 1) & 0xffff
         return cid
 
+    @property
+    def cid(self):
+        """The cid the next submitted command will be assigned."""
+        return self._cid
+
+    def set_next_cid(self, cid):
+        """Advance the cid counter (monotonically; never rewinds).
+
+        Migration tests reconstruct a driver from a source snapshot: the
+        cids must continue the source's sequence, otherwise a fresh cid
+        may collide with the cids already committed to migrated (or
+        still zeroed) completion queue memory and be matched against
+        stale contents.
+        """
+        self._cid = max(self._cid, cid & 0xffff)
+
     # pci / controller registers ----------------------------------------
 
     def setup_pci(self, bar0=BAR0_DEFAULT):

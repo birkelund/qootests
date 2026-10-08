@@ -25,6 +25,7 @@ QEMU stderr is captured to '<workdir>/qemu-stderr.log' and included in
 error messages (a QEMU crash shows up as the connection going away).
 """
 import base64
+import json
 import os
 import signal
 import socket
@@ -294,3 +295,48 @@ class QemuQTest:
         """Read bytes from guest RAM (qtest 'b64read' command)."""
         resp = self.cmd(f'b64read 0x{addr:x} 0x{length:x}')
         return base64.b64decode(resp.split(' ', 1)[1])
+
+
+class QmpClient:
+    """
+    Minimal QMP client over a unix socket, just enough to drive
+    migration for tests that run a second QEMU (see
+    test_vnvme_migration.py). Asynchronous events are skipped; the
+    'return'/'error' of the command sent is returned as a dict.
+    """
+
+    def __init__(self, sock_path, timeout=15.0):
+        self.timeout = timeout
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(timeout)
+        self.sock.connect(sock_path)
+        self._buf = b''
+        greeting = self._read_msg()
+        if 'QMP' not in greeting:
+            raise QTestError(f'unexpected QMP greeting: {greeting}')
+        self.cmd('qmp_capabilities')
+
+    def _read_msg(self):
+        while b'\n' not in self._buf:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise QTestError('QMP connection closed')
+            self._buf += chunk
+        line, self._buf = self._buf.split(b'\n', 1)
+        return json.loads(line)
+
+    def cmd(self, name, args=None):
+        d = {'execute': name}
+        if args is not None:
+            d['arguments'] = args
+        self.sock.sendall(json.dumps(d).encode() + b'\n')
+        while True:
+            msg = self._read_msg()
+            if 'error' in msg:
+                raise QTestError(f'QMP command "{name}" failed: {msg["error"]}')
+            if 'return' in msg:
+                return msg['return']
+            # asynchronous event, keep reading
+
+    def close(self):
+        self.sock.close()
