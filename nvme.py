@@ -31,6 +31,8 @@ BUF_ADDR = 0x300000          # scratch buffer for identify etc.
 IO_SQ_ADDR = 0x500000
 IO_CQ_ADDR = 0x600000
 DATA_ADDR = 0x700000         # data buffer for I/O commands
+DBS_ADDR = 0x900000          # shadow doorbell buffer (DBBUF) guest memory
+EIS_ADDR = 0x980000          # shadow event index buffer (DBBUF) guest memory
 DB_BASE = 0x1000             # queue doorbell area starts at BAR0 + 0x1000
 
 BAR0_DEFAULT = 0xfe000000
@@ -75,6 +77,7 @@ ADM_ABORT = 0x08
 ADM_SET_FEATURES = 0x09
 ADM_GET_FEATURES = 0x0a
 ADM_AER = 0x0c
+ADM_DBBUF_CONFIG = 0x7c
 ADM_FORMAT = 0x80
 
 # io opcodes
@@ -216,6 +219,16 @@ def build_write_zeroes(nsid, slba, nlb):
     return c
 
 
+def build_dbbuf_config(dbs_addr, eis_addr):
+    """Doorbell Buffer Config (0x7c): PRP1 = shadow doorbell buffer,
+    PRP2 = shadow event index buffer."""
+    c = bytearray(64)
+    c[0] = ADM_DBBUF_CONFIG
+    struct.pack_into('<Q', c, 0x18, dbs_addr)
+    struct.pack_into('<Q', c, 0x20, eis_addr)
+    return c
+
+
 def build_dsm(nsid, prp1, nr, attrs=0x04):
     """Dataset Management; attrs=0x04 is the deallocate (AD) bit."""
     c = bytearray(64)
@@ -304,10 +317,13 @@ class NvmeDev:
     """A single NVMe device (default: vnvme) in a qtest-driven QEMU."""
 
     def __init__(self, disk, workdir, device='vnvme', serial='foo',
-                 qemu_binary=None, qemu_args=None):
+                 qemu_binary=None, qemu_args=None, device_opts=''):
+        assert ';' not in device_opts and ',' not in device_opts
+        opts = f',{device_opts}' if device_opts else ''
         args = ['-M', 'pc',
                 '-drive', f'if=none,id=drv0,file={disk},format=raw',
-                '-device', f'{device},drive=drv0,serial={serial},addr=04.0']
+                '-device', f'{device},drive=drv0,serial={serial},'
+                           f'addr=04.0{opts}']
         if qemu_args:
             args += qemu_args
         self.q = QemuQTest(args, workdir=workdir, qemu_binary=qemu_binary)
