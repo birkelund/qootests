@@ -97,6 +97,7 @@ ST_LBA_RANGE = 0x0080
 ST_INVALID_CQID = 0x0100
 ST_INVALID_QID = 0x0101
 ST_INVALID_QUEUE_DEL = 0x010c
+ST_DATA_TRAS_ERROR = 0x0004
 ST_DNR = 0x4000
 
 # feature identifiers
@@ -332,17 +333,22 @@ class NvmeDev:
     """A single NVMe device (default: vnvme) in a qtest-driven QEMU."""
 
     def __init__(self, disk, workdir, device='vnvme', serial='foo',
-                 qemu_binary=None, qemu_args=None, device_opts='',
-                 machine='pc'):
+                 qemu_binary=None, qemu_args=None, pre_args=None,
+                 device_opts='', machine='pc'):
         # a comma-separated list of device options; ';'-separated shell
         # metacharacters are rejected (the string goes into argv).
         assert ';' not in device_opts
         assert not device_opts.startswith(',') and not device_opts.endswith(',')
         opts = f',{device_opts}' if device_opts else ''
         args = ['-M', machine,
-                '-drive', f'if=none,id=drv0,file={disk},format=raw',
-                '-device', f'{device},drive=drv0,serial={serial},'
-                           f'addr=04.0{opts}']
+                '-drive', f'if=none,id=drv0,file={disk},format=raw']
+        if pre_args:
+            # placed before the -device line: options that must exist
+            # at device realization time (e.g. -object memory-backend
+            # referenced by a memdev property)
+            args += pre_args
+        args += ['-device', f'{device},drive=drv0,serial={serial},'
+                            f'addr=04.0{opts}']
         if qemu_args:
             args += qemu_args
         self.q = QemuQTest(args, workdir=workdir, qemu_binary=qemu_binary)
