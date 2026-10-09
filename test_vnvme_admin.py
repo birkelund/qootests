@@ -15,11 +15,14 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from uuid import uuid5
+
 from nvme import (NvmeDev, make_disk, check, ID_CTRL_VID, ID_CTRL_OACS,
                   ID_CTRL_NN, ID_CTRL_ONCS, ID_CTRL_SQES, ID_NS_NSZE,
                   ID_NS_DS, NVME_OACS_FORMAT, ADM_FORMAT, REG_CAP, REG_ASQ,
                   REG_ACQ, BUF_ADDR, FEAT_NUM_QUEUES, build_identify,
-                  CNS_ACTIVE_LIST, CNS_DESCR_LIST, ST_SUCCESS,
+                  CNS_ACTIVE_LIST, CNS_DESCR_LIST, NVME_NS_UUID_NAMESPACE,
+                  NIDT_UUID, NIDT_CSI, ST_SUCCESS,
                   ST_INVALID_FIELD, ST_INVALID_NSID, ST_INVALID_OPCODE,
                   ST_DNR)
 
@@ -93,11 +96,27 @@ def run(tmp):
               'Active Namespace List bad min_nsid (broadcast - 1)')
 
         # Identify: Namespace Identification Descriptor List (CNS 0x03).
-        # vnvme exposes no namespace identifiers, so the returned list
-        # must be empty.
+        # vnvme exposes no configurable namespace identifiers; the UUID
+        # is derived from the controller serial and the nsid as an
+        # RFC 4122 version 5 UUID (see hw/nvme/core/ns.c). Verify the
+        # descriptor list carries the derived UUID and the CSI.
+        want_uuid = uuid5(NVME_NS_UUID_NAMESPACE, f'{dev.serial}:{1}')
+
         descr = dev.identify_ns_descr_list(nsid=1)
-        if any(descr):
-            raise AssertionError('Namespace Descriptor List must be empty')
+        entries = {}
+        off = 0
+        while off + 4 <= len(descr) and descr[off]:
+            nidt, nidl = descr[off], descr[off + 1]
+            entries[nidt] = bytes(descr[off + 4:off + 4 + nidl])
+            off += 4 + nidl
+
+        for nidt in (NIDT_UUID, NIDT_CSI):
+            if nidt not in entries:
+                raise AssertionError(
+                    f'Namespace Descriptor List misses NIDT {nidt:#x}')
+        check(entries[NIDT_UUID], want_uuid.bytes,
+              'Namespace Descriptor List UUID (derived v5)')
+        check(entries[NIDT_CSI][0], 0, 'Namespace Descriptor List CSI (NVM)')
 
         # An invalid nsid must be rejected.
         _, sc = dev.aq.run(build_identify(CNS_DESCR_LIST, nsid=0xdead,

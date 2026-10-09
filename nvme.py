@@ -21,6 +21,7 @@ with DNR is 0x4080). Names match include/block/nvme.h.
 import os
 import struct
 import time
+from uuid import UUID
 
 from qtest import QemuQTest
 
@@ -108,6 +109,16 @@ CNS_NS = 0x00
 CNS_CTRL = 0x01
 CNS_ACTIVE_LIST = 0x02
 CNS_DESCR_LIST = 0x03
+
+# Frozen namespace UUID for QEMU-derived namespace UUIDs (RFC 4122
+# version 5; must match hw/nvme/core/ns.c).
+NVME_NS_UUID_NAMESPACE = UUID('e0746fe0-2a28-5b3a-81ff-d3b35cce6101')
+
+# Namespace Identifier Descriptor types (Identify CNS 0x03)
+NIDT_EUI64 = 0x01
+NIDT_NGUID = 0x02
+NIDT_UUID = 0x03
+NIDT_CSI = 0x04
 
 # CC and CSTS bits
 CC_EN = 1 << 0
@@ -351,6 +362,7 @@ class NvmeDev:
                             f'addr=04.0{opts}']
         if qemu_args:
             args += qemu_args
+        self.serial = serial
         self.q = QemuQTest(args, workdir=workdir, qemu_binary=qemu_binary)
         self.bar0 = None
         self.aq = None
