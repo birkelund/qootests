@@ -52,6 +52,7 @@ REG_ACQ = 0x30
 
 # NvmeIdentifyController field offsets
 ID_CTRL_VID = 0
+ID_CTRL_CNTLID = 78           # controller id (after sn/mn/fr/rab/ieee/cmic/mdts)
 ID_CTRL_OACS = 256           # optional admin command support
 ID_CTRL_SQES = 512           # sqes[0] = min | max << 4
 ID_CTRL_CQES = 513
@@ -60,6 +61,7 @@ ID_CTRL_ONCS = 520
 
 # OACS bits
 NVME_OACS_FORMAT = 1 << 1
+NVME_OACS_NS_MGMT = 1 << 3
 
 # NvmeIdentifyNamespace field offsets
 ID_NS_NSZE = 0
@@ -78,6 +80,7 @@ ADM_ABORT = 0x08
 ADM_SET_FEATURES = 0x09
 ADM_GET_FEATURES = 0x0a
 ADM_AER = 0x0c
+ADM_NS_ATTACHMENT = 0x15
 ADM_DBBUF_CONFIG = 0x7c
 ADM_FORMAT = 0x80
 
@@ -99,7 +102,14 @@ ST_INVALID_CQID = 0x0100
 ST_INVALID_QID = 0x0101
 ST_INVALID_QUEUE_DEL = 0x010c
 ST_DATA_TRAS_ERROR = 0x0004
+ST_NS_ALREADY_ATTACHED = 0x0118
+ST_NS_NOT_ATTACHED = 0x011a
+ST_NS_CTRL_LIST_INVALID = 0x011c
 ST_DNR = 0x4000
+
+# Namespace Attachment (0x15) selection values (cdw10 & 0xf)
+NS_ATTACHMENT_ATTACH = 0x0
+NS_ATTACHMENT_DETACH = 0x1
 
 # feature identifiers
 FEAT_NUM_QUEUES = 0x07
@@ -264,6 +274,18 @@ def build_dsm(nsid, prp1, nr, attrs=0x04):
     struct.pack_into('<Q', c, 0x18, prp1)
     struct.pack_into('<I', c, 0x28, nr - 1)   # cdw10: nr - 1
     struct.pack_into('<I', c, 0x2c, attrs)
+    return c
+
+
+def build_ns_attachment(sel, nsid, prp1):
+    """Namespace Attachment (0x15); prp1 is the controller list buffer:
+    a 4096-byte array of uint16, element 0 being the number of
+    controller ids that follow."""
+    c = bytearray(64)
+    c[0] = ADM_NS_ATTACHMENT
+    struct.pack_into('<I', c, 4, nsid)
+    struct.pack_into('<Q', c, 0x18, prp1)
+    struct.pack_into('<I', c, 0x28, sel & 0xf)
     return c
 
 
@@ -503,6 +525,19 @@ class NvmeDev:
                                            prp1=BUF_ADDR))
         check(sc, ST_SUCCESS, f'Identify Namespace Descriptor List ({nsid})')
         return self.q.mem_read(BUF_ADDR, 4096)
+
+    def ns_attachment(self, sel, nsid, ctrl_ids):
+        """Namespace Attachment (0x15): attach (`sel` =
+        NS_ATTACHMENT_ATTACH) or detach (`NS_ATTACHMENT_DETACH`)
+        namespace `nsid` to/from the controllers in `ctrl_ids`.
+        Returns the 16-bit status code (DNR included)."""
+        assert ctrl_ids, 'controller list must not be empty'
+        self.q.mem_zero(BUF_ADDR, 4096)
+        data = struct.pack('<' + 'H' * (len(ctrl_ids) + 1),
+                           len(ctrl_ids), *ctrl_ids)
+        self.q.mem_write(BUF_ADDR, data)
+        _, sc = self.aq.run(build_ns_attachment(sel, nsid, BUF_ADDR))
+        return sc
 
     def get_features(self, fid, cdw11=0):
         return self.aq.run(build_get_features(fid, cdw11))
