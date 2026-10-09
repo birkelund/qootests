@@ -117,9 +117,20 @@ CSTS_RDY = 1 << 0
 # PCI config space addresses for the device under test at 04.0
 PCI_CFG = 0x80000000 | (4 << 11)
 PCI_CFG_BAR0 = PCI_CFG + 0x10
+PCI_CFG_BAR2 = PCI_CFG + 0x18
 PCI_CFG_CMD = PCI_CFG + 0x04
 PCI_CMD_MEM = 0x02
 PCI_CMD_MASTER = 0x04
+
+# CMB/PMR BAR0 register offsets (NvmeBar layout, see include/block/nvme.h)
+REG_CMBLOC = 0x38
+REG_CMBSZ = 0x3c
+REG_CMBMSC = 0x50
+REG_CMBSTS = 0x58
+REG_PMRCAP = 0xe00
+REG_PMRCTL = 0xe04
+REG_PMRMSCL = 0xe14
+REG_PMRMSCU = 0xe18
 
 
 def check(actual, expected, what):
@@ -323,7 +334,10 @@ class NvmeDev:
     def __init__(self, disk, workdir, device='vnvme', serial='foo',
                  qemu_binary=None, qemu_args=None, device_opts='',
                  machine='pc'):
-        assert ';' not in device_opts and ',' not in device_opts
+        # a comma-separated list of device options; ';'-separated shell
+        # metacharacters are rejected (the string goes into argv).
+        assert ';' not in device_opts
+        assert not device_opts.startswith(',') and not device_opts.endswith(',')
         opts = f',{device_opts}' if device_opts else ''
         args = ['-M', machine,
                 '-drive', f'if=none,id=drv0,file={disk},format=raw',
