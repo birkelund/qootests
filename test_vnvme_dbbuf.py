@@ -5,7 +5,9 @@ Shadow doorbell buffer (DBBUF) regression test (vnvme and nvme).
 
 Covers: OACS.DBCS discovery (the controller must advertise shadow
 doorbell buffer support or a real driver never uses it), Doorbell
-Buffer Config validation (page alignment), shadow
+Buffer Config validation (page alignment; non-mappable shadow buffer
+addresses, e.g. the controller's own MMIO, are rejected without
+enabling dbbuf), shadow
 initialization for existing queues, I/O submission through the shadow
 doorbells (the ring on the real doorbell is only a kick and carries a
 wrong tail value), the event index announce path, admin queue shadow
@@ -126,6 +128,24 @@ def run(tmp, device, ioeventfd=False):
         check(sc, ST_INVALID_FIELD | ST_DNR, 'dbbuf_config misaligned dbs')
         _, sc = dev.aq.run(build_dbbuf_config(DBS_ADDR, EIS_ADDR + 4))
         check(sc, ST_INVALID_FIELD | ST_DNR, 'dbbuf_config misaligned eis')
+
+        # The shadow buffers must be mappable memory: the device
+        # initializes the shadow doorbells and writes the event indexes
+        # without bouncing. Pointing them at the controller's own MMIO
+        # must be rejected instead of silently enabling dbbuf and
+        # dropping every shadow update (wedging a polling host).
+        dev.q.mem_zero(DBS_ADDR, PAGE)
+        _, sc = dev.aq.run(build_dbbuf_config(dev.bar0, EIS_ADDR))
+        check(sc, ST_INVALID_FIELD | ST_DNR, 'dbbuf_config dbs in own MMIO')
+        _, sc = dev.aq.run(build_dbbuf_config(DBS_ADDR, dev.bar0))
+        check(sc, ST_INVALID_FIELD | ST_DNR, 'dbbuf_config eis in own MMIO')
+
+        # dbbuf must remain disabled: the plain admin doorbell writes
+        # of the commands above must not have been mirrored into the
+        # (still zeroed) shadow page
+        _, sc = dev.aq.run(build_get_features(FEAT_NUM_QUEUES))
+        check(sc, ST_SUCCESS, 'Get Features after rejected dbbuf_config')
+        check(dev.q.readl(DBS_ADDR), 0, 'dbbuf not enabled after rejection')
 
         io = dev.create_io_queue(1)
         db = DbbufQueue(io, 1)
