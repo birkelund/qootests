@@ -62,6 +62,7 @@ ID_CTRL_ONCS = 520
 # OACS bits
 NVME_OACS_FORMAT = 1 << 1
 NVME_OACS_NS_MGMT = 1 << 3
+NVME_OACS_DBCS = 1 << 8
 
 # NvmeIdentifyNamespace field offsets
 ID_NS_NSZE = 0

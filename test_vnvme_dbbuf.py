@@ -3,7 +3,9 @@
 """
 Shadow doorbell buffer (DBBUF) regression test (vnvme and nvme).
 
-Covers: Doorbell Buffer Config validation (page alignment), shadow
+Covers: OACS.DBCS discovery (the controller must advertise shadow
+doorbell buffer support or a real driver never uses it), Doorbell
+Buffer Config validation (page alignment), shadow
 initialization for existing queues, I/O submission through the shadow
 doorbells (the ring on the real doorbell is only a kick and carries a
 wrong tail value), the event index announce path, admin queue shadow
@@ -25,8 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from nvme import (NvmeDev, make_disk, check, build_rw, build_get_features,
                   build_dbbuf_config, DATA_ADDR, DBS_ADDR, EIS_ADDR,
-                  ID_NS_DS, ST_SUCCESS, ST_INVALID_FIELD, ST_DNR,
-                  FEAT_NUM_QUEUES, CMD_READ, CMD_WRITE)
+                  ID_CTRL_OACS, ID_NS_DS, NVME_OACS_DBCS, ST_SUCCESS,
+                  ST_INVALID_FIELD, ST_DNR, FEAT_NUM_QUEUES, CMD_READ,
+                  CMD_WRITE)
 
 PAGE = 4096
 NLB = 8                        # blocks per I/O
@@ -103,6 +106,15 @@ def run(tmp, device, ioeventfd=False):
     with NvmeDev(disk, workdir=tmp, device=device, device_opts=opts) as dev:
         dev.setup_pci()
         dev.enable()
+
+        # discovery: a real driver only sets up the shadow doorbell
+        # buffers when the controller advertises OACS.DBCS (e.g. Linux
+        # bails out of dbbuf setup entirely without the bit, silently
+        # paying an MMIO exit per submission doorbell). The command
+        # working is not enough - the controller must be discovered.
+        ctrl = dev.identify_ctrl()
+        oacs = struct.unpack_from('<H', ctrl, ID_CTRL_OACS)[0]
+        check(oacs & NVME_OACS_DBCS, NVME_OACS_DBCS, 'OACS.DBCS advertised')
 
         bs = 1 << dev.identify_ns(1)[ID_NS_DS]
 
