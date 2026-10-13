@@ -23,7 +23,9 @@ script: it exits non-zero on failure and prints `<name>: PASS` on success.
 
 - `qtest.py` — minimal qtest protocol client + QEMU runner (`QemuQTest`)
   and a minimal QMP client (`QmpClient`, used by the migration test).
-  Non-obvious points:
+  Accessors cover 1/2/4/8-byte guest memory and MMIO (`readq`/`writeq`
+  are used to pin native-width 64-bit register writes). Non-obvious
+  points:
   - The test side is the unix socket *server*; QEMU connects to us.
   - No BIOS with qtest: PCI BARs and command register must be set up
     manually via the 0xcf8/0xcfc config ports (`setup_pci()`).
@@ -34,7 +36,11 @@ script: it exits non-zero on failure and prints `<name>: PASS` on success.
 - `nvme.py` — NVMe helper layer: `NvmeDev` (default device `vnvme`, fixed
   PCI addr 04.0), `NvmeQueue` (CID-matched CQE polling, no fixed sleeps),
   64-byte command builders, and register/status constants matching
-  `include/block/nvme.h` in the QEMU tree.
+  `include/block/nvme.h` in the QEMU tree. `NvmeDev` extras: `pre_args`
+  inserts extra QEMU argv *before* the `-device` line (used for a second
+  controller at PCI 05.0 in the dptr/queue_addr tests and for
+  `-object memory-backend` in the PMR dptr test), `machine` overrides the
+  default `pc` (`q35` for the intx and migration tests).
 - `test_*.py` — self-contained tests; they create their own temp
   workdirs and sparse disk images (`make_disk`).
 
