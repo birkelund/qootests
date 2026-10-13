@@ -6,25 +6,33 @@ vnvme admin-path regression test.
 Covers: PCI BAR setup, controller enable/disable transitions, Identify
 Controller/Namespace, Get Features (supported and unsupported FIDs),
 invalid admin opcode handling, and that the admin queue survives a
-controller reset (CC.EN=0 -> 1 re-enable).
+controller reset (CC.EN=0 -> 1 re-enable). The 64-bit admin queue
+address registers are programmed both with split 32-bit accesses
+(low/high word) and with single 64-bit (native width) writes. Per the
+spec the host shall access registers in their native width or in
+aligned 32-bit accesses; accesses targeting a portion of two or more
+registers (an 8-byte write at VS, INTMC, or a doorbell) are not
+supported and vnvme ignores them - that policy is pinned here.
 """
 import os
 import struct
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from uuid import uuid5
 
-from nvme import (NvmeDev, make_disk, check, ID_CTRL_VID, ID_CTRL_OACS,
-                  ID_CTRL_NN, ID_CTRL_ONCS, ID_CTRL_SQES, ID_NS_NSZE,
-                  ID_NS_DS, NVME_OACS_FORMAT, ADM_FORMAT, REG_CAP, REG_ASQ,
-                  REG_ACQ, BUF_ADDR, FEAT_NUM_QUEUES, build_identify,
-                  CNS_ACTIVE_LIST, CNS_DESCR_LIST, NVME_NS_UUID_NAMESPACE,
-                  NIDT_UUID, NIDT_CSI, ST_SUCCESS,
-                  ST_INVALID_FIELD, ST_INVALID_NSID, ST_INVALID_OPCODE,
-                  ST_DNR)
+from nvme import (NvmeDev, NvmeQueue, make_disk, check, ID_CTRL_VID,
+                  ID_CTRL_OACS, ID_CTRL_NN, ID_CTRL_ONCS, ID_CTRL_SQES,
+                  ID_NS_NSZE, ID_NS_DS, NVME_OACS_FORMAT, ADM_FORMAT, REG_CAP,
+                  REG_ASQ, REG_ACQ, BUF_ADDR, DB_BASE, FEAT_NUM_QUEUES,
+                  build_identify, build_get_features, CNS_ACTIVE_LIST,
+                  CNS_DESCR_LIST, NVME_NS_UUID_NAMESPACE, NIDT_UUID,
+                  NIDT_CSI, REG_VS, REG_INTMS, REG_INTMC, REG_CC, REG_AQA,
+                  CC_EN, CC_IOSQES, CC_IOCQES, ST_SUCCESS, ST_INVALID_FIELD,
+                  ST_INVALID_NSID, ST_INVALID_OPCODE, ST_DNR)
 
 
 def run(tmp):
@@ -186,6 +194,80 @@ def run(tmp):
         ctrl = dev.identify_ctrl()
         vid = struct.unpack_from('<H', ctrl, ID_CTRL_VID)[0]
         check(vid, 0x1b36, 'Identify Controller over split-programmed queues')
+
+        # Per the spec, the host shall access registers in their native
+        # width or in aligned 32-bit accesses; accesses that target a
+        # portion of two or more registers are not supported (undefined
+        # device-side). vnvme ignores such writes and logs a guest
+        # error; only the 64-bit ASQ/ACQ registers accept a 64-bit
+        # write. That policy is pinned here.
+        dev.disable()
+        check(dev.is_rdy(), 0, 'RDY before 8-byte queue setup')
+
+        asq3, acq3 = 0x820000, 0x830000
+
+        # the 64-bit ASQ/ACQ registers accept single 64-bit (native
+        # width) writes
+        dev.reg_write(REG_AQA, 0xf000f)
+        dev.q.writeq(dev.bar0 + REG_ASQ, asq3)
+        dev.q.writeq(dev.bar0 + REG_ACQ, acq3)
+        check(dev.reg_read(REG_ASQ), asq3, 'ASQ 8-byte write')
+        check(dev.reg_read(REG_ACQ), acq3, 'ACQ 8-byte write')
+
+        # an 8-byte write at VS spans VS (read-only) and INTMS; it must
+        # be ignored in its entirety - the INTMS half must not apply
+        dev.q.writeq(dev.bar0 + REG_VS, 0xff00 << 32)
+        check(dev.reg_read(REG_INTMS), 0, 'VS+INTMS 8-byte write ignored')
+
+        # an 8-byte write spanning INTMC and CC must be ignored in its
+        # entirety: no interrupt unmask, and the controller must not
+        # be enabled by the CC half
+        dev.q.writeq(dev.bar0 + REG_INTMC,
+                     ((CC_EN | CC_IOSQES | CC_IOCQES) << 32) | 0x0f00)
+        check(dev.reg_read(REG_INTMS), 0, 'INTMC+CC 8-byte write ignored')
+        check(dev.is_rdy(), 0, 'CC half of INTMC+CC 8-byte write ignored')
+
+        # the doorbells are 32-bit registers; an 8-byte doorbell write
+        # spans two doorbells and must be ignored entirely. place a
+        # command and ring the admin SQ doorbell with a 64-bit write:
+        # nothing must happen.
+        dev.q.mem_zero(asq3, 16 * 64)
+        dev.q.mem_zero(acq3, 16 * 16)
+        dev.reg_write(REG_CC, CC_EN | CC_IOSQES | CC_IOCQES)
+        dev._poll_rdy(1, 5.0)
+        dev.aq = NvmeQueue(dev, asq3, acq3,
+                           dev.bar0 + DB_BASE, dev.bar0 + DB_BASE + 4, 16)
+
+        c = build_get_features(FEAT_NUM_QUEUES)
+        cid = dev.next_cid()
+        struct.pack_into('<H', c, 2, cid)
+        dev.aq.pending.append(cid)
+        dev.q.mem_write(dev.aq.sq_addr + dev.aq.sq_tail * 64, bytes(c))
+        dev.aq.sq_tail += 1
+        dev.q.writeq(dev.aq.sq_db, dev.aq.sq_tail)
+
+        slot = dev.aq.cq_addr + dev.aq.cq_head * 16
+        deadline = time.time() + 0.5
+        while time.time() < deadline:
+            if dev.q.readw(slot + 12) == cid:
+                raise AssertionError('doorbell 8-byte write was processed')
+            time.sleep(0.01)
+
+        # the proper 32-bit doorbell ring must submit the command
+        dev.q.writel(dev.aq.sq_db, dev.aq.sq_tail)
+        got = None
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            got = dev.q.readw(slot + 12)
+            if got == cid:
+                break
+            time.sleep(0.001)
+        check(got, cid, 'SQ doorbell 32-bit write after ignored 8-byte')
+
+        # the 64-bit-programmed admin queues must work end to end
+        ctrl = dev.identify_ctrl()
+        vid = struct.unpack_from('<H', ctrl, ID_CTRL_VID)[0]
+        check(vid, 0x1b36, 'Identify Controller over 8-byte-programmed queues')
 
         # final disable
         dev.disable()
