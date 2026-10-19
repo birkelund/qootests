@@ -25,14 +25,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from uuid import uuid5
 
 from nvme import (NvmeDev, NvmeQueue, make_disk, check, ID_CTRL_VID,
-                  ID_CTRL_OACS, ID_CTRL_NN, ID_CTRL_ONCS, ID_CTRL_SQES,
-                  ID_NS_NSZE, ID_NS_DS, NVME_OACS_FORMAT, ADM_FORMAT, REG_CAP,
-                  REG_ASQ, REG_ACQ, BUF_ADDR, DB_BASE, FEAT_NUM_QUEUES,
-                  build_identify, build_get_features, CNS_ACTIVE_LIST,
-                  CNS_DESCR_LIST, NVME_NS_UUID_NAMESPACE, NIDT_UUID,
-                  NIDT_CSI, REG_VS, REG_INTMS, REG_INTMC, REG_CC, REG_AQA,
-                  CC_EN, CC_IOSQES, CC_IOCQES, ST_SUCCESS, ST_INVALID_FIELD,
-                  ST_INVALID_NSID, ST_INVALID_OPCODE, ST_DNR)
+                  ID_CTRL_OACS, ID_CTRL_AERL, ID_CTRL_NN, ID_CTRL_ONCS,
+                  ID_CTRL_SQES, ID_NS_NSZE, ID_NS_DS, NVME_OACS_FORMAT,
+                  ADM_FORMAT, REG_CAP, REG_ASQ, REG_ACQ, BUF_ADDR, DB_BASE,
+                  FEAT_NUM_QUEUES, build_identify, build_get_features,
+                  CNS_ACTIVE_LIST, CNS_DESCR_LIST, NVME_NS_UUID_NAMESPACE,
+                  NIDT_UUID, NIDT_CSI, REG_VS, REG_INTMS, REG_INTMC, REG_CC,
+                  REG_AQA, CC_EN, CC_IOSQES, CC_IOCQES, ST_SUCCESS,
+                  ST_INVALID_FIELD, ST_INVALID_NSID, ST_INVALID_OPCODE,
+                  ST_DNR)
 
 
 def run(tmp):
@@ -62,6 +63,11 @@ def run(tmp):
         check(nn, 1, 'Identify Controller number of namespaces')
         check(oncs, 0x000c, 'Identify Controller ONCS (write zeroes + dsm)')
         check(sqes, 0x66, 'Identify Controller SQES (min 6, max 6)')
+
+        # AERL is a fixed device constant (vnvme never queues async
+        # events, so there is nothing to tune); 0-based, so 3 admits
+        # four outstanding Asynchronous Event Requests.
+        check(ctrl[ID_CTRL_AERL], 3, 'Identify Controller AERL (fixed)')
 
         # vnvme must not support Format NVM: neither advertise it...
         oacs = struct.unpack_from('<H', ctrl, ID_CTRL_OACS)[0]
@@ -272,6 +278,32 @@ def run(tmp):
         # final disable
         dev.disable()
         check(dev.is_rdy(), 0, 'RDY after final disable')
+
+    # the fixed AERL retired the 'aerl' property: device creation must
+    # now reject it outright instead of quietly ignoring the override.
+    # (qtest connects before machine init, so the rejection arrives as
+    # QEMU exiting on its own shortly after launch - poll for its exit
+    # and read the captured stderr rather than assuming launch-time
+    # failure.)
+    tmp2 = os.path.join(tmp, 'aerl-prop')
+    os.mkdir(tmp2)
+    dev2 = NvmeDev(make_disk(tmp2), workdir=tmp2, device_opts='aerl=2')
+    dev2.q.start()
+
+    deadline = time.time() + 5
+    while time.time() < deadline and dev2.q.proc.poll() is None:
+        time.sleep(0.05)
+
+    rc = dev2.q.proc.poll()
+    dev2.q.stop(raise_on_error=False)
+    if rc is None:
+        raise AssertionError('vnvme accepted the removed aerl property')
+    with open(dev2.q.stderr_path, 'rb') as f:
+        stderr = f.read()
+    if b'aerl' not in stderr:
+        raise AssertionError(
+            f'vnvme launch failed without naming the aerl property '
+            f'(status {rc}): {stderr!r}')
 
 
 def main():
