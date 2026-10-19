@@ -15,9 +15,11 @@ sync on real doorbell writes, and that a controller reset clears the
 negotiated dbbuf state (plain doorbell flow afterwards, then
 re-establishing dbbuf).
 
-Runs against both the vnvme and nvme devices, each with ioeventfd
-off and on (with ioeventfd=on the doorbell writes are dispatched to
-the event notifier handlers instead of the MMIO write handlers).
+Runs against the vnvme and nvme devices. vnvme has no ioeventfd
+parameter (the offload is always used when available); the nvme test
+device is run with the deprecated ioeventfd parameter off and on
+(with ioeventfd=on the doorbell writes are dispatched to the
+event notifier handlers instead of the MMIO write handlers).
 """
 import os
 import struct
@@ -231,12 +233,19 @@ def run(tmp, device, ioeventfd=False):
 
 
 def main():
-    for device in ('vnvme', 'nvme'):
-        for ioeventfd in (False, True):
+    # vnvme has no ioeventfd property (the offload is always attempted
+    # when a doorbell buffer is configured); the nvme test device still
+    # accepts the deprecated parameter, so it keeps the off/on runs.
+    cases = [('vnvme', False)]
+    cases += [('nvme', ioeventfd) for ioeventfd in (False, True)]
+    for device, ioeventfd in cases:
+        if device == 'nvme':
             tag = f'{device},ioeventfd={int(ioeventfd)}'
-            with tempfile.TemporaryDirectory(prefix='qootest-') as tmp:
-                run(tmp, device, ioeventfd)
-            print(f'test_vnvme_dbbuf[{tag}]: PASS')
+        else:
+            tag = device
+        with tempfile.TemporaryDirectory(prefix='qootest-') as tmp:
+            run(tmp, device, ioeventfd)
+        print(f'test_vnvme_dbbuf[{tag}]: PASS')
 
 
 if __name__ == '__main__':
