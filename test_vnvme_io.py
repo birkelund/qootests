@@ -4,10 +4,11 @@
 vnvme I/O-path regression test.
 
 Covers: I/O queue creation/deletion, write/read data integrity, OOB
-read rejection, Write Zeroes, Flush, DSM (deallocate), single-namespace
-enforcement (the production device is hardcoded to NSID 1), negative
-queue deletion, and that I/O queues can be re-created after a controller
-reset.
+read rejection, the MDTS transfer-size boundary (a 2 MiB command passes,
+one block more is rejected), Write Zeroes, Flush, DSM (deallocate),
+single-namespace enforcement (the production device is hardcoded to
+NSID 1), negative queue deletion, and that I/O queues can be re-created
+after a controller reset.
 """
 import os
 import struct
@@ -20,11 +21,19 @@ from nvme import (NvmeDev, make_disk, check, build_rw, build_flush,
                   build_write_zeroes, build_dsm, build_delete_sq,
                   build_delete_cq, DATA_ADDR, ID_NS_NSZE, ID_NS_DS,
                   NSID_BROADCAST, ST_SUCCESS, ST_LBA_RANGE,
-                  ST_INVALID_QID, ST_INVALID_CQID, ST_INVALID_NSID,
-                  ST_DNR, CMD_WRITE, CMD_READ)
+                  ST_INVALID_FIELD, ST_INVALID_QID, ST_INVALID_CQID,
+                  ST_INVALID_NSID, ST_DNR, CMD_WRITE, CMD_READ)
 
 # guest buffer for the DSM range entry
 DSM_BUF = DATA_ADDR + 0x1000
+
+# MDTS boundary buffers: the fixed limit is 9 (a 2 MiB maximum transfer
+# in units of the 4 KiB emulated page size). The payload crosses many
+# pages, so commands carry a PRP list: prp1 is the first page, prp2
+# points at a list of the remaining page pointers.
+MDTS_BYTES = 2 * 1024 * 1024
+BIGDATA_ADDR = 0x2000000
+PRPLIST_ADDR = BIGDATA_ADDR + 0x400000
 
 
 def ns_params(dev):
@@ -75,6 +84,33 @@ def run(tmp):
         _, sc = io.run(build_rw(CMD_READ, 1, nsze - nlb, nlb + 1,
                                 prp1=DATA_ADDR))
         check(sc, ST_LBA_RANGE | ST_DNR, 'OOB read (end of namespace)')
+
+        # MDTS boundary: exactly 2 MiB in one command must pass, one
+        # block more must be rejected before any data is touched
+        # (Invalid Field|DNR straight from the transfer size check).
+        mdts_nlb = MDTS_BYTES // bs
+        pages = MDTS_BYTES // 4096
+        prp_list = struct.pack(
+            '<%dQ' % (pages - 1),
+            *[BIGDATA_ADDR + 4096 * i for i in range(1, pages)])
+        dev.q.mem_write(PRPLIST_ADDR, prp_list)
+
+        pat = bytes(((i >> 8) * 7 + 0x5a) & 0xff
+                    for i in range(mdts_nlb * bs))
+        dev.q.mem_write(BIGDATA_ADDR, pat)
+        _, sc = io.run(build_rw(CMD_WRITE, 1, 0x2000, mdts_nlb,
+                                prp1=BIGDATA_ADDR, prp2=PRPLIST_ADDR))
+        check(sc, ST_SUCCESS, 'Write at the MDTS boundary (2 MiB)')
+        dev.q.mem_zero(BIGDATA_ADDR, MDTS_BYTES)
+        _, sc = io.run(build_rw(CMD_READ, 1, 0x2000, mdts_nlb,
+                                prp1=BIGDATA_ADDR, prp2=PRPLIST_ADDR))
+        check(sc, ST_SUCCESS, 'Read at the MDTS boundary (2 MiB)')
+        if dev.q.mem_read(BIGDATA_ADDR, MDTS_BYTES) != pat:
+            raise AssertionError('MDTS boundary readback mismatch')
+
+        _, sc = io.run(build_rw(CMD_WRITE, 1, 0x2000, mdts_nlb + 1,
+                                prp1=BIGDATA_ADDR, prp2=PRPLIST_ADDR))
+        check(sc, ST_INVALID_FIELD | ST_DNR, 'Write one block past MDTS')
 
         # Write Zeroes over the first-written area, read back, verify zero
         _, sc = io.run(build_write_zeroes(1, 0x10, nlb))

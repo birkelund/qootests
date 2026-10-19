@@ -25,15 +25,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from uuid import uuid5
 
 from nvme import (NvmeDev, NvmeQueue, make_disk, check, ID_CTRL_VID,
-                  ID_CTRL_OACS, ID_CTRL_AERL, ID_CTRL_NN, ID_CTRL_ONCS,
-                  ID_CTRL_SQES, ID_NS_NSZE, ID_NS_DS, NVME_OACS_FORMAT,
-                  ADM_FORMAT, REG_CAP, REG_ASQ, REG_ACQ, BUF_ADDR, DB_BASE,
-                  FEAT_NUM_QUEUES, build_identify, build_get_features,
-                  CNS_ACTIVE_LIST, CNS_DESCR_LIST, NVME_NS_UUID_NAMESPACE,
-                  NIDT_UUID, NIDT_CSI, REG_VS, REG_INTMS, REG_INTMC, REG_CC,
-                  REG_AQA, CC_EN, CC_IOSQES, CC_IOCQES, ST_SUCCESS,
-                  ST_INVALID_FIELD, ST_INVALID_NSID, ST_INVALID_OPCODE,
-                  ST_DNR)
+                  ID_CTRL_OACS, ID_CTRL_AERL, ID_CTRL_MDTS, ID_CTRL_NN,
+                  ID_CTRL_ONCS, ID_CTRL_SQES, ID_NS_NSZE, ID_NS_DS,
+                  NVME_OACS_FORMAT, ADM_FORMAT, REG_CAP, REG_ASQ, REG_ACQ,
+                  BUF_ADDR, DB_BASE, FEAT_NUM_QUEUES, build_identify,
+                  build_get_features, CNS_ACTIVE_LIST, CNS_DESCR_LIST,
+                  NVME_NS_UUID_NAMESPACE, NIDT_UUID, NIDT_CSI, REG_VS,
+                  REG_INTMS, REG_INTMC, REG_CC, REG_AQA, CC_EN, CC_IOSQES,
+                  CC_IOCQES, ST_SUCCESS, ST_INVALID_FIELD, ST_INVALID_NSID,
+                  ST_INVALID_OPCODE, ST_DNR)
 
 
 def run(tmp):
@@ -68,6 +68,12 @@ def run(tmp):
         # events, so there is nothing to tune); 0-based, so 3 admits
         # four outstanding Asynchronous Event Requests.
         check(ctrl[ID_CTRL_AERL], 3, 'Identify Controller AERL (fixed)')
+
+        # MDTS is fixed at 9: the maximum transfer is 2 MiB (reported
+        # in units of the 4 KiB emulated page size), the largest
+        # fully-scattered PRP transfer that stays within the device
+        # mapping path's iovec budget.
+        check(ctrl[ID_CTRL_MDTS], 9, 'Identify Controller MDTS (fixed)')
 
         # vnvme must not support Format NVM: neither advertise it...
         oacs = struct.unpack_from('<H', ctrl, ID_CTRL_OACS)[0]

@@ -55,6 +55,7 @@ ID_CTRL_VID = 0
 ID_CTRL_CNTLID = 78           # controller id (after sn/mn/fr/rab/ieee/cmic/mdts)
 ID_CTRL_OACS = 256           # optional admin command support
 ID_CTRL_AERL = 259           # asynchronous event request limit (0-based)
+ID_CTRL_MDTS = 77            # max data transfer size (in MPSMIN pages)
 ID_CTRL_SQES = 512           # sqes[0] = min | max << 4
 ID_CTRL_CQES = 513
 ID_CTRL_NN = 516
@@ -231,11 +232,12 @@ def build_delete_cq(cqid):
     return c
 
 
-def build_rw(op, nsid, slba, nlb, prp1=0):
+def build_rw(op, nsid, slba, nlb, prp1=0, prp2=0):
     c = bytearray(64)
     c[0] = op
     struct.pack_into('<I', c, 4, nsid)
     struct.pack_into('<Q', c, 0x18, prp1)
+    struct.pack_into('<Q', c, 0x20, prp2)
     struct.pack_into('<Q', c, 0x28, slba)
     # cdw12: nlb - 1 (0-based count)
     struct.pack_into('<I', c, 0x30, (nlb - 1) & 0xffff)
