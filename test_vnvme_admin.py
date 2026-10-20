@@ -311,6 +311,63 @@ def run(tmp):
             f'vnvme launch failed without naming the aerl property '
             f'(status {rc}): {stderr!r}')
 
+    # vnvme's bootindex: like the test device's legacy namespace, the
+    # embedded nsid 1 namespace is the boot device and its bootindex
+    # is a controller property. The property must be accepted - the
+    # setter runs when the device is created (after the qtest
+    # connection; poll for QEMU's own exit) and registers the
+    # namespace in the boot order - and the controller must still be
+    # usable with it set.
+    tmp3 = os.path.join(tmp, 'bootindex-accept')
+    os.mkdir(tmp3)
+    dev3 = NvmeDev(make_disk(tmp3), workdir=tmp3, device_opts='bootindex=0')
+    dev3.q.start()
+
+    deadline = time.time() + 2
+    while time.time() < deadline and dev3.q.proc.poll() is None:
+        time.sleep(0.05)
+
+    rc = dev3.q.proc.poll()
+    if rc is not None:
+        with open(dev3.q.stderr_path, 'rb') as f:
+            raise AssertionError(
+                f'vnvme rejected the bootindex property (status {rc}): '
+                f'{f.read()!r}')
+    dev3.setup_pci()
+    if not dev3.reg_read(REG_CAP) & 0xffff:
+        raise AssertionError('controller unusable with bootindex set')
+    dev3.q.stop(raise_on_error=True)
+
+    # the setter enforces global bootindex uniqueness: a second
+    # controller grabbing the same slot must make QEMU exit naming
+    # the duplicate.
+    tmp4a = os.path.join(tmp, 'bootindex-dup-a')
+    tmp4b = os.path.join(tmp, 'bootindex-dup-b')
+    os.mkdir(tmp4a)
+    os.mkdir(tmp4b)
+    dev4 = NvmeDev(
+        make_disk(tmp4b), workdir=tmp4b, device_opts='bootindex=0',
+        pre_args=['-drive',
+                  f'if=none,id=drv1,file={make_disk(tmp4a)},format=raw',
+                  '-device',
+                  'vnvme,drive=drv1,serial=bar,addr=05.0,bootindex=0'])
+    dev4.q.start()
+
+    deadline = time.time() + 5
+    while time.time() < deadline and dev4.q.proc.poll() is None:
+        time.sleep(0.05)
+
+    rc = dev4.q.proc.poll()
+    dev4.q.stop(raise_on_error=False)
+    if rc is None:
+        raise AssertionError('vnvme accepted a duplicate bootindex')
+    with open(dev4.q.stderr_path, 'rb') as f:
+        stderr = f.read()
+    if b'bootindex' not in stderr or b'has already been used' not in stderr:
+        raise AssertionError(
+            f'vnvme launch failed without naming the duplicate bootindex '
+            f'(status {rc}): {stderr!r}')
+
 
 def main():
     with tempfile.TemporaryDirectory(prefix='qootest-') as tmp:
